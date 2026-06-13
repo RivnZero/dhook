@@ -100,7 +100,7 @@ func buildMultipart(msg *Message, files []*File) (*bytes.Buffer, string, error) 
 	}
 
 	jsonPart, err := writer.CreatePart(textproto.MIMEHeader{
-		"Content-Disposition": {fmt.Sprintf(`form-data; name="payload_json"`)},
+		"Content-Disposition": {`form-data; name="payload_json"`},
 		"Content-Type":       {"application/json"},
 	})
 	if err != nil {
