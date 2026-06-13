@@ -1,0 +1,60 @@
+version: 2
+
+builds:
+  - main: ./examples/advanced
+    binary: dhook
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - linux
+      - darwin
+    goarch:
+      - "386"
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: "386"
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - LICENSE
+      - README.md
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 999
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: RivnZero
+    name: dhook
+  draft: false
+  prerelease: auto
+  header: |
+    ## What's Changed
+  footer: |
+    **Full Changelog**: https://github.com/RivnZero/dhook/compare/{{ .PreviousTag }}...{{ .Tag }}
