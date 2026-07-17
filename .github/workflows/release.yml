@@ -21,6 +21,18 @@ jobs:
         with:
           go-version: stable
 
+      - name: Format
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -race ./...
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:

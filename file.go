@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -47,6 +48,10 @@ func (c *Client) SendFile(ctx context.Context, name string, reader io.Reader, ms
 }
 
 func (c *Client) SendFiles(ctx context.Context, msg *Message, files ...*File) ([]*Response, error) {
+	if len(c.urls) == 0 {
+		return nil, errors.New("dhook: no webhook URLs configured")
+	}
+
 	if msg == nil {
 		msg = &Message{}
 	}
@@ -101,7 +106,7 @@ func buildMultipart(msg *Message, files []*File) (*bytes.Buffer, string, error) 
 
 	jsonPart, err := writer.CreatePart(textproto.MIMEHeader{
 		"Content-Disposition": {`form-data; name="payload_json"`},
-		"Content-Type":       {"application/json"},
+		"Content-Type":        {"application/json"},
 	})
 	if err != nil {
 		return nil, "", err

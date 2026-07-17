@@ -12,7 +12,9 @@ type Queue struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
+	submitters  sync.WaitGroup
 	running     bool
+	stopped     bool
 	mu          sync.Mutex
 }
 
@@ -29,48 +31,52 @@ func NewQueue(client *Client, workerCount int) *Queue {
 
 func (q *Queue) Start(ctx context.Context) {
 	q.mu.Lock()
-	if q.running {
+	if q.running || q.stopped {
 		q.mu.Unlock()
 		return
 	}
 	q.ctx, q.cancel = context.WithCancel(ctx)
 	q.running = true
+	q.wg.Add(q.workerCount)
 	q.mu.Unlock()
 
 	for i := 0; i < q.workerCount; i++ {
-		q.wg.Add(1)
 		go q.worker()
 	}
 }
 
 func (q *Queue) worker() {
 	defer q.wg.Done()
-	for {
-		select {
-		case <-q.ctx.Done():
-			for {
-				select {
-				case <-q.jobs:
-				default:
-					return
-				}
-			}
-		case fn, ok := <-q.jobs:
-			if !ok {
-				return
-			}
-			fn()
-		}
+	for fn := range q.jobs {
+		fn()
 	}
 }
 
 func (q *Queue) Add(msg *Message) {
+	q.mu.Lock()
+	if q.stopped {
+		q.mu.Unlock()
+		return
+	}
+	q.submitters.Add(1)
+	q.mu.Unlock()
+	defer q.submitters.Done()
+
 	q.jobs <- func() {
 		q.client.Send(q.ctx, msg)
 	}
 }
 
 func (q *Queue) AddFunc(fn func()) {
+	q.mu.Lock()
+	if q.stopped {
+		q.mu.Unlock()
+		return
+	}
+	q.submitters.Add(1)
+	q.mu.Unlock()
+	defer q.submitters.Done()
+
 	q.jobs <- fn
 }
 
@@ -80,10 +86,13 @@ func (q *Queue) Stop() {
 		q.mu.Unlock()
 		return
 	}
-	q.cancel()
 	q.running = false
+	q.stopped = true
 	q.mu.Unlock()
+	q.submitters.Wait()
+	close(q.jobs)
 	q.wg.Wait()
+	q.cancel()
 }
 
 func (q *Queue) Len() int {

@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	urlpkg "net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -41,23 +43,24 @@ type AllowedMentions struct {
 }
 
 type Response struct {
-	ID             string   `json:"id"`
-	ChannelID      string   `json:"channel_id"`
-	GuildID        string   `json:"guild_id,omitempty"`
-	WebhookID      string   `json:"webhook_id,omitempty"`
-	Content        string   `json:"content"`
-	Embeds         []*Embed `json:"embeds,omitempty"`
-	Timestamp      string   `json:"timestamp,omitempty"`
+	ID        string   `json:"id"`
+	ChannelID string   `json:"channel_id"`
+	GuildID   string   `json:"guild_id,omitempty"`
+	WebhookID string   `json:"webhook_id,omitempty"`
+	Content   string   `json:"content"`
+	Embeds    []*Embed `json:"embeds,omitempty"`
+	Timestamp string   `json:"timestamp,omitempty"`
 }
 
 type Client struct {
-	urls          []string
-	httpClient    *http.Client
-	rateLimiter   *RateLimiter
-	successHooks  []SuccessFunc
+	urls           []string
+	httpClient     *http.Client
+	httpClientMu   sync.RWMutex
+	rateLimiter    *RateLimiter
+	successHooks   []SuccessFunc
 	rateLimitHooks []RateLimitFunc
-	errorHooks    []ErrorFunc
-	hooksMu       sync.RWMutex
+	errorHooks     []ErrorFunc
+	hooksMu        sync.RWMutex
 }
 
 func New(urls ...string) *Client {
@@ -69,7 +72,22 @@ func New(urls ...string) *Client {
 }
 
 func (c *Client) SetHTTPClient(client *http.Client) {
+	if client == nil {
+		return
+	}
+	c.httpClientMu.Lock()
 	c.httpClient = client
+	c.httpClientMu.Unlock()
+}
+
+func (c *Client) getHTTPClient() *http.Client {
+	c.httpClientMu.RLock()
+	client := c.httpClient
+	c.httpClientMu.RUnlock()
+	if client != nil {
+		return client
+	}
+	return http.DefaultClient
 }
 
 func (c *Client) AddHook(event EventType, fn interface{}) {
@@ -93,29 +111,36 @@ func (c *Client) AddHook(event EventType, fn interface{}) {
 
 func (c *Client) fireSuccess(resp *Response) {
 	c.hooksMu.RLock()
-	defer c.hooksMu.RUnlock()
-	for _, h := range c.successHooks {
+	hooks := append([]SuccessFunc(nil), c.successHooks...)
+	c.hooksMu.RUnlock()
+	for _, h := range hooks {
 		h(resp)
 	}
 }
 
 func (c *Client) fireRateLimit(d time.Duration) {
 	c.hooksMu.RLock()
-	defer c.hooksMu.RUnlock()
-	for _, h := range c.rateLimitHooks {
+	hooks := append([]RateLimitFunc(nil), c.rateLimitHooks...)
+	c.hooksMu.RUnlock()
+	for _, h := range hooks {
 		h(d)
 	}
 }
 
 func (c *Client) fireError(err error) {
 	c.hooksMu.RLock()
-	defer c.hooksMu.RUnlock()
-	for _, h := range c.errorHooks {
+	hooks := append([]ErrorFunc(nil), c.errorHooks...)
+	c.hooksMu.RUnlock()
+	for _, h := range hooks {
 		h(err)
 	}
 }
 
 func (c *Client) Send(ctx context.Context, msg *Message) ([]*Response, error) {
+	if len(c.urls) == 0 {
+		return nil, errors.New("dhook: no webhook URLs configured")
+	}
+
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return nil, err
@@ -156,6 +181,15 @@ func (c *Client) Send(ctx context.Context, msg *Message) ([]*Response, error) {
 }
 
 func (c *Client) doPost(ctx context.Context, url, contentType string, data []byte) (*Response, error) {
+	webhookURL, err := urlpkg.Parse(url)
+	if err != nil {
+		return nil, fmt.Errorf("dhook: parse webhook URL: %w", err)
+	}
+	query := webhookURL.Query()
+	query.Set("wait", "true")
+	webhookURL.RawQuery = query.Encode()
+	url = webhookURL.String()
+
 	maxRetries := 5
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -171,7 +205,7 @@ func (c *Client) doPost(ctx context.Context, url, contentType string, data []byt
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("User-Agent", "dhook/1.0")
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := c.getHTTPClient().Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -206,8 +240,14 @@ func (c *Client) doPost(ctx context.Context, url, contentType string, data []byt
 		}
 
 		var r Response
+		if len(respBody) == 0 {
+			if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+				return &r, nil
+			}
+			return nil, fmt.Errorf("dhook: empty response body (status %d)", resp.StatusCode)
+		}
 		if err := json.Unmarshal(respBody, &r); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("dhook: invalid response (status %d): %s", resp.StatusCode, string(respBody))
 		}
 		return &r, nil
 	}
@@ -222,13 +262,25 @@ func (c *Client) Edit(ctx context.Context, messageID string, msg *Message) (*Res
 	return c.editMessage(ctx, c.urls[0], messageID, msg)
 }
 
+func messageURL(webhookURL, messageID string) (string, error) {
+	u, err := urlpkg.Parse(webhookURL)
+	if err != nil {
+		return "", fmt.Errorf("dhook: parse webhook URL: %w", err)
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/messages/" + messageID
+	return u.String(), nil
+}
+
 func (c *Client) editMessage(ctx context.Context, url, messageID string, msg *Message) (*Response, error) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return nil, err
 	}
 
-	editURL := url + "/messages/" + messageID
+	editURL, err := messageURL(url, messageID)
+	if err != nil {
+		return nil, err
+	}
 	maxRetries := 5
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -244,7 +296,7 @@ func (c *Client) editMessage(ctx context.Context, url, messageID string, msg *Me
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", "dhook/1.0")
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := c.getHTTPClient().Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -279,8 +331,11 @@ func (c *Client) editMessage(ctx context.Context, url, messageID string, msg *Me
 		}
 
 		var r Response
+		if len(respBody) == 0 {
+			return nil, fmt.Errorf("dhook: empty response body (status %d)", resp.StatusCode)
+		}
 		if err := json.Unmarshal(respBody, &r); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("dhook: invalid response (status %d): %s", resp.StatusCode, string(respBody))
 		}
 		return &r, nil
 	}
@@ -296,7 +351,10 @@ func (c *Client) Delete(ctx context.Context, messageID string) error {
 }
 
 func (c *Client) deleteMessage(ctx context.Context, url, messageID string) error {
-	deleteURL := url + "/messages/" + messageID
+	deleteURL, err := messageURL(url, messageID)
+	if err != nil {
+		return err
+	}
 	maxRetries := 5
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -311,7 +369,7 @@ func (c *Client) deleteMessage(ctx context.Context, url, messageID string) error
 		}
 		req.Header.Set("User-Agent", "dhook/1.0")
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := c.getHTTPClient().Do(req)
 		if err != nil {
 			return err
 		}
@@ -357,8 +415,8 @@ func parseRetryAfter(headers http.Header) time.Duration {
 		return time.Second
 	}
 
-	if secs, err := strconv.Atoi(v); err == nil {
-		d := time.Duration(secs) * time.Second
+	if secs, err := strconv.ParseFloat(v, 64); err == nil {
+		d := time.Duration(secs * float64(time.Second))
 		if d > 0 {
 			return d
 		}

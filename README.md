@@ -8,8 +8,8 @@
 <h1 align="center">dhook</h1>
 
 <p align="center">
-  A production-ready, enterprise-grade Discord Webhook SDK for Go.<br>
-  Multi-URL routing, automatic rate limiting, resilient queue, and fluent embed builder.
+  A lightweight, zero-dependency Discord webhook client for Go.<br>
+  Multi-URL routing, automatic rate-limit handling, background queues, and a fluent embed builder.
 </p>
 
 ---
@@ -181,9 +181,9 @@ for i := 0; i < 1000; i++ {
 |--------|-------------|
 | `NewQueue(client, workerCount)` | Create a new queue with N workers |
 | `Start(ctx)` | Start processing jobs |
-| `Stop()` | Stop processing and drain remaining jobs |
-| `Add(msg)` | Queue a message for sending |
-| `AddFunc(fn)` | Queue a custom function for execution |
+| `Stop()` | Drain jobs accepted before stopping workers; do not call from a queue worker because it waits for the drain |
+| `Add(msg)` | Queue a message for sending; no-op after `Stop` |
+| `AddFunc(fn)` | Queue a custom function for execution; no-op after `Stop` |
 | `Len()` | Number of pending jobs |
 | `Cap()` | Maximum queue capacity |
 
@@ -219,27 +219,15 @@ dhook \
 
 ## Deployment & Release Pipeline
 
-### Local Pre-Release (deploy.bat)
+### Local Pre-Release
 
-The `deploy.bat` script is the local gatekeeper before any release. Run it to verify everything is production-ready:
+Run the tracked checks before creating a release tag:
 
-```bat
-deploy.bat
-```
-
-It performs the following steps:
-
-1. **`go vet ./...`** — Static analysis for common issues
-2. **`go test -v ./...`** — Runs all tests (stops on first failure)
-3. **Cross-compilation dry-run** — Builds the CLI binary for all 9 targets:
-   - `windows/386`, `windows/amd64`, `windows/arm64`
-   - `linux/386`, `linux/amd64`, `linux/arm64`
-   - `darwin/amd64`, `darwin/arm64`
-4. **Verdict** — If all builds succeed, prints the safe-to-tag instructions:
-
-```
-git tag vX.Y.Z
-git push origin vX.Y.Z
+```bash
+test -z "$(gofmt -l $(git ls-files '*.go'))"
+go vet ./...
+go build ./...
+go test -race ./...
 ```
 
 ### Cloud Release (GoReleaser + GitHub Actions)
@@ -257,12 +245,15 @@ Once you push a semantic version tag, the `release.yml` workflow automatically:
 ### Full Release Workflow
 
 ```bash
-# 1. Run local gatekeeper
-deploy.bat
+# 1. Run local checks
+test -z "$(gofmt -l $(git ls-files '*.go'))"
+go vet ./...
+go build ./...
+go test -race ./...
 
 # 2. Tag and push
-git tag v1.0.0
-git push origin v1.0.0
+git tag v0.1.0
+git push origin v0.1.0
 
 # 3. GitHub Actions handles the rest automatically
 ```
@@ -271,7 +262,11 @@ git push origin v1.0.0
 
 ### Rate Limiting
 
-dhook reads Discord's `X-Rate-Limit-Remaining` and `Retry-After` headers on every response. When limits are hit, the rate limiter automatically blocks subsequent requests until the cooldown expires. No dropped messages, no manual retry logic.
+dhook reads Discord's `X-Rate-Limit-Remaining` and `Retry-After` headers on every response. When limits are hit, the rate limiter blocks subsequent requests until the cooldown expires.
+
+### Successful Sends
+
+`Send` adds Discord's `wait=true` query parameter while preserving existing query parameters, so Discord returns the created message. If a compatible endpoint still returns `204 No Content`, dhook treats it as success and returns an empty `Response`.
 
 ### Exponential Backoff
 
